@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+const base = process.env.FOCUSSYNC_TEST_URL || 'http://127.0.0.1:5173';
+let checks = 0;
+async function req(path, data, token) {
+  const response = await fetch(base + path, { method: data ? 'POST' : 'GET', headers: { ...(data ? { 'Content-Type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(data ? { body: JSON.stringify(data) } : {}) });
+  const body = await response.json(); return { status: response.status, ...body };
+}
+const created = await req('/api/rooms', { name: 'API verification', hostName: 'Test host', config: { mode: 'custom', focus: 1, rest: 1, sound: false } });
+assert.equal(created.status, 201); checks++;
+const path = '/api/rooms/' + created.room.code; const hostToken = created.token;
+assert.equal((await req(path)).status, 401); checks++;
+const joinKey = crypto.randomUUID(); const joined = await req(path, { action: 'join', name: 'Test member', eventId: joinKey });
+assert.equal(joined.status, 200); assert.equal(joined.room.members.length, 2); checks++;
+const repeatJoin = await req(path, { action: 'join', name: 'Test member', eventId: joinKey });
+assert.equal(repeatJoin.token, joined.token); assert.equal(repeatJoin.room.members.length, 2); checks++;
+assert.ok(joined.room.members.every(m => !('token' in m) && !('joinKey' in m))); checks++;
+assert.equal((await req(path, { action: 'start', eventId: crypto.randomUUID(), revision: joined.room.revision }, joined.token)).status, 403); checks++;
+const startKey = crypto.randomUUID();
+const started = await req(path, { action: 'start', eventId: startKey, revision: joined.room.revision }, hostToken);
+assert.equal(started.room.timer.status, 'running'); checks++;
+const duplicate = await req(path, { action: 'start', eventId: startKey, revision: joined.room.revision }, hostToken);
+assert.equal(duplicate.room.timer.startedAt, started.room.timer.startedAt); assert.equal(duplicate.room.revision, started.room.revision); checks++;
+const memberRead = await req(path, undefined, joined.token);
+assert.equal(memberRead.room.timer.startedAt, started.room.timer.startedAt); checks++;
+assert.equal((await req(path, { action: 'pause', eventId: crypto.randomUUID(), revision: 0 }, hostToken)).status, 409); checks++;
+const paused = await req(path, { action: 'pause', eventId: crypto.randomUUID(), revision: memberRead.room.revision }, hostToken);
+assert.equal(paused.room.timer.status, 'paused'); checks++;
+const settings = await req(path, { action: 'settings', eventId: crypto.randomUUID(), revision: paused.room.revision, name: 'Renamed room', config: { mode: 'infinite', focus: 25, rest: 5, sound: false } }, hostToken);
+assert.equal(settings.room.name, 'Renamed room'); assert.equal(settings.room.config.mode, 'infinite'); assert.equal(settings.room.timer.elapsed, 0); checks++;
+const ended = await req(path, { action: 'end', eventId: crypto.randomUUID(), revision: settings.room.revision }, hostToken);
+assert.equal(ended.room.status, 'ended'); checks++;
+assert.equal((await req(path, { action: 'join', name: 'Late guest', eventId: crypto.randomUUID() })).status, 410); checks++;
+assert.equal((await req('/api/rooms/AAAAAA', { action: 'join', name: 'Guest', eventId: crypto.randomUUID() })).status, 404); checks++;
+assert.equal((await req('/api/rooms', { name: 'Bad input', hostName: '', config: { mode: 'custom', focus: -1, rest: 1, sound: false } })).status, 400); checks++;
+console.log(`${checks} HTTP integration checks passed (create, join, deduplication, permissions, synchronization, stale writes, settings, end, and validation).`);
